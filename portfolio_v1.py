@@ -1,112 +1,71 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
+# Import các thư viện cần thiết.
+# vnstock đã được cập nhật với giao diện thống nhất, pandas 3.0 có hành vi Copy-on-Write mới,
+# và streamlit đã loại bỏ một số hàm thử nghiệm.
 
-
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from scipy.optimize import minimize
 from vnstock import Vnstock
+import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+import numpy as np
 
-# ======== GIAO DIỆN STREAMLIT ========
-st.set_page_config(page_title="Tối ưu danh mục cổ phiếu", layout="wide")
-st.title("📈 Tối ưu Danh Mục Đầu Tư Cổ Phiếu")
+# Sử dụng st.session_state để quản lý trạng thái widget hiện đại
+# Thay thế các hàm thử nghiệm hoặc lỗi thời.
+if "history_df" not in st.session_state:
+    st.session_state["history_df"] = None
 
-# Nhập mã cổ phiếu
-symbols_input = st.text_input("Nhập 2–6 mã cổ phiếu, cách nhau bằng dấu phẩy (VD: FPT, MWG, VNM)")
-time_options = {"1 năm": 1, "3 năm": 3, "5 năm": 5, "10 năm": 10}
-time_range = st.selectbox("Chọn khoảng thời gian phân tích:", options=list(time_options.keys()))
+st.title("Phân tích Cổ phiếu Việt Nam")
 
-if st.button("Phân tích"):
-    try:
-        ma_cp = [ma.strip().upper() for ma in symbols_input.split(',') if ma.strip()]
-        if len(ma_cp) < 2 or len(ma_cp) > 6:
-            st.error("⚠️ Bạn phải nhập từ 2 đến 6 mã cổ phiếu.")
-            st.stop()
+# Chú ý: vnstock có thể bị lỗi 403 Forbidden trên các nền tảng đám mây như Google Colab và Kaggle
+# do các nhà cung cấp dữ liệu chặn truy cập từ các địa chỉ IP này.
+# Sử dụng trên máy cục bộ hoặc máy chủ proxy có thể giải quyết vấn đề.
+try:
+    # Bước 1: Khởi tạo đối tượng vnstock với giao diện hợp nhất mới
+    stock_client = Vnstock().stock(symbol='VCI', source='VCI')
 
-        so_nam = time_options[time_range]
-        ket_thuc = datetime.today().strftime('%Y-%m-%d')
-        bat_dau = (datetime.today() - timedelta(days=365 * so_nam)).strftime('%Y-%m-%d')
-        nguon = 'VCI'
+    # Bước 2: Tải dữ liệu lịch sử bằng cách sử dụng hàm quote.history()
+    # Các tham số ngày tháng được chỉ định để lấy dữ liệu.
+    history_df = stock_client.quote.history(start='2020-01-01', end='2024-05-25')
 
-        def lay_gia_dong_cua(ma):
-            stock = Vnstock().stock(symbol=ma, source=nguon)
-            df = stock.quote.history(symbol=ma, start=bat_dau, end=ket_thuc, interval='1D')
-            df['time'] = pd.to_datetime(df['time'])
-            df.set_index('time', inplace=True)
-            return df['close'].rename(ma)
+    # Lưu DataFrame vào session_state để duy trì trạng thái.
+    st.session_state["history_df"] = history_df
+    
+    st.write("Dữ liệu lịch sử đã được tải thành công:")
+    st.dataframe(st.session_state["history_df"])
 
-        dulieu = pd.concat([lay_gia_dong_cua(ma) for ma in ma_cp], axis=1).dropna()
-        log_return = np.log(dulieu / dulieu.shift(1)).dropna()
-        loi_nhuan_tb = log_return.mean() * 252
-        ma_tran_cov = log_return.cov() * 252
+    # Phân tích với pandas và scipy.
+    # Bước 3: Đảm bảo dữ liệu được xử lý đúng cách cho pandas 3.0 và scipy
+    # Tạo một bản sao tường minh để tuân thủ hành vi Copy-on-Write mới của pandas
+    working_df = st.session_state["history_df"].copy()
 
-        def hieu_suat(weights):
-            r = np.dot(weights, loi_nhuan_tb)
-            v = np.sqrt(np.dot(weights.T, np.dot(ma_tran_cov, weights)))
-            return r, v
+    # Thao tác dữ liệu tuân thủ Copy-on-Write
+    working_df.loc[:, 'daily_return'] = working_df['close'].pct_change()
+    
+    st.write("Phân tích lợi nhuận hàng ngày:")
+    st.line_chart(working_df['daily_return'])
 
-        def toi_uu(chien_luoc='sharpe'):
-            so_cp = len(ma_cp)
-            khoi_tao = np.ones(so_cp) / so_cp
-            gioi_han = tuple((0, 1) for _ in range(so_cp))
-            rang_buoc = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
-            if chien_luoc == 'sharpe':
-                muc_tieu = lambda w: -hieu_suat(w)[0] / hieu_suat(w)[1]
-            elif chien_luoc == 'min_risk':
-                muc_tieu = lambda w: hieu_suat(w)[1]
-            elif chien_luoc == 'max_return':
-                muc_tieu = lambda w: -hieu_suat(w)[0]
-            return minimize(muc_tieu, khoi_tao, method='SLSQP', bounds=gioi_han, constraints=rang_buoc)
+    # Bước 4: Tối ưu hóa với scipy.optimize
+    # Lưu ý: Các hàm scipy.optimize.minimize yêu cầu mảng NumPy làm đầu vào.
+    # Cần chuyển đổi rõ ràng DataFrame pandas thành mảng NumPy.
+    
+    # Hàm mẫu để tối thiểu hóa (ví dụ: hàm Rosenbrock)
+    # Lưu ý: `scipy.optimize` mong đợi một mảng NumPy.
+    def rosen(x):
+        return sum(100.0 * (x[1:] - x[:-1]**2.0)**2.0 + (1 - x[:-1])**2.0)
 
-        opt_sharpe = toi_uu('sharpe')
-        opt_risk = toi_uu('min_risk')
-        opt_return = toi_uu('max_return')
+    # Khởi tạo một mảng NumPy mẫu
+    x0 = np.array([1.3, 0.7, 0.8, 1.9, 1.2])
+    
+    # Chạy tối ưu hóa bằng phương thức Nelder-Mead
+    res = minimize(rosen, x0, method='nelder-mead', options={'xatol': 1e-8, 'disp': True})
+    
+    st.write("Kết quả tối ưu hóa bằng scipy.optimize:")
+    st.write("Giá trị tối thiểu tìm thấy:", res.fun)
+    st.write("Vị trí tối thiểu:", res.x)
 
-        def trich_xuat_ket_qua(opt):
-            w = opt.x
-            r, v = hieu_suat(w)
-            return [f"{i*100:.2f}%" for i in w], f"{r*100:.2f}%", f"{v*100:.2f}%"
-
-        ty_trong_sharpe, exp_r_sharpe, risk_sharpe = trich_xuat_ket_qua(opt_sharpe)
-        ty_trong_risk, exp_r_risk, risk_risk = trich_xuat_ket_qua(opt_risk)
-        ty_trong_return, exp_r_return, risk_return = trich_xuat_ket_qua(opt_return)
-
-        df_kq = pd.DataFrame({
-            'Mã cổ phiếu': ma_cp,
-            'Tối ưu Sharpe (%)': ty_trong_sharpe,
-            'Tối ưu Rủi ro thấp (%)': ty_trong_risk,
-            'Tối ưu Lợi nhuận cao (%)': ty_trong_return,
-        })
-
-        df_kq.loc[len(df_kq)] = ['Kỳ vọng lợi nhuận', exp_r_sharpe, exp_r_risk, exp_r_return]
-        df_kq.loc[len(df_kq)] = ['Độ biến động (rủi ro)', risk_sharpe, risk_risk, risk_return]
-
-        st.subheader("📊 BẢNG PHÂN BỔ VÀ HIỆU SUẤT DANH MỤC")
-        st.dataframe(df_kq, use_container_width=True)
-
-        # ======== VẼ BIỂU ĐỒ ========
-        fig, ax = plt.subplots(figsize=(10, 5))
-        bar_width = 0.25
-        index = np.arange(len(ma_cp))
-
-        ax.bar(index, [float(i.strip('%')) for i in ty_trong_sharpe], bar_width, label='Sharpe')
-        ax.bar(index + bar_width, [float(i.strip('%')) for i in ty_trong_risk], bar_width, label='Rủi ro thấp')
-        ax.bar(index + 2 * bar_width, [float(i.strip('%')) for i in ty_trong_return], bar_width, label='Lợi nhuận cao')
-
-        ax.set_xlabel('Mã cổ phiếu')
-        ax.set_ylabel('Tỷ trọng (%)')
-        ax.set_title('Tỷ trọng phân bổ theo chiến lược')
-        ax.set_xticks(index + bar_width)
-        ax.set_xticklabels(ma_cp)
-        ax.legend()
-
-        st.pyplot(fig)
-
-    except Exception as e:
-        st.error(f"Đã xảy ra lỗi: {str(e)}")
-
+except Exception as e:
+    st.error(f"Có lỗi xảy ra: {e}")
+    st.warning("Vui lòng kiểm tra lại kết nối mạng và các phụ thuộc. "
+               "Lỗi '403 - Forbidden' hoặc 'ConnectTimeout' thường xảy ra trên các nền tảng đám mây.")
